@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>SecureShare — password "elephant"</title>
+<style>
+  :root{font-family:Inter,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial; color:#111}
+  body{margin:0;padding:24px;background:#f7fafc}
+  .container{max-width:860px;margin:24px auto;background:#fff;border-radius:12px;padding:20px;box-shadow:0 6px 18px rgba(20,30,40,0.08)}
+  h1{margin:0 0 8px;font-size:20px}
+  p.lead{margin:0 0 18px;color:#4b5563}
+  label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
+  textarea{width:100%;min-height:140px;padding:12px;border-radius:8px;border:1px solid #e6e9ef;font-size:14px;resize:vertical}
+  input[type="text"]{width:100%;padding:10px;border-radius:8px;border:1px solid #e6e9ef}
+  .row{display:flex;gap:10px;margin-top:12px}
+  button{background:#0f62fe;color:#fff;border:0;padding:10px 14px;border-radius:8px;font-weight:600;cursor:pointer}
+  button.ghost{background:#eef2ff;color:#0f62fe;border:1px solid #e0e7ff}
+  button.danger{background:#ef4444}
+  .meta{font-size:13px;color:#6b7280;margin-top:10px}
+  .password-line{display:flex;gap:10px;align-items:center;margin-top:8px}
+  .pill{background:#eef2ff;color:#0f62fe;padding:6px 10px;border-radius:999px;font-weight:700}
+  .sharelink{margin-top:12px;word-break:break-all;background:#f3f4f6;padding:10px;border-radius:8px;border:1px dashed #e5e7eb}
+  footer{margin-top:18px;color:#6b7280;font-size:13px}
+</style>
+</head>
+<body>
+<div class="container" role="main">
+  <h1>SecureShare — share encrypted messages in one link</h1>
+  <p class="lead">Password is preset to <span class="pill">elephant</span>. The app encrypts the message in the browser and embeds the ciphertext in the URL fragment. No server needed.</p>
+
+  <label for="message">Message to share</label>
+  <textarea id="message" placeholder="Write the secret message here..."></textarea>
+
+  <div class="password-line">
+    <div style="flex:1">
+      <label>Password (preset & locked)</label>
+      <input id="password" type="text" value="elephant" disabled aria-disabled="true" />
+    </div>
+    <div style="width:200px">
+      <label>Expiry (minutes, optional)</label>
+      <input id="expiry" type="text" placeholder="e.g., 60" />
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="createBtn">Create shareable link</button>
+    <button id="decryptBtn" class="ghost">Decrypt from URL</button>
+    <button id="clearBtn" class="danger">Clear</button>
+  </div>
+
+  <div id="linkArea" style="display:none">
+    <label>Shareable URL (copy & send)</label>
+    <div class="sharelink" id="sharelink" tabindex="0"></div>
+    <div style="margin-top:8px">
+      <button id="copyBtn" class="ghost">Copy link</button>
+      <button id="openBtn" class="ghost">Open link in new tab</button>
+      <button id="shortenBtn" class="ghost" disabled title="No server-side shortening in this demo">Shorten (disabled)</button>
+    </div>
+    <p class="meta">Note: link contains encrypted data in the fragment (after #). Fragments are not sent to servers when visiting the URL.</p>
+  </div>
+
+  <div id="decryptedArea" style="display:none">
+    <label>Decrypted message</label>
+    <textarea id="decrypted" readonly></textarea>
+  </div>
+
+  <footer>
+    <strong>Warning:</strong> This is a demo. The password is public; anyone with the link and the password can read the message. Use only for low-risk sharing.
+  </footer>
+</div>
+
+<script>
+(async () => {
+  // Utilities
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+
+  function bufToB64(buf) {
+    // base64url encode
+    let bin = '';
+    const bytes = new Uint8Array(buf);
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64ToBuf(b64url) {
+    // base64url decode
+    const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+    // pad
+    const pad = b64.length % 4;
+    const padded = b64 + (pad ? '='.repeat(4 - pad) : '');
+    const bin = atob(padded);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return buf.buffer;
+  }
+
+  async function deriveKey(password, salt, iterations = 250000) {
+    // PBKDF2 -> AES-GCM 256
+    const pwKey = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({
+      name: 'PBKDF2',
+      salt,
+      iterations,
+      hash: 'SHA-256'
+    }, pwKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  }
+
+  async function encryptMessage(password, plaintext, expiry = null) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(password, salt.buffer);
+    // Attach optional metadata (expiry as epoch ms)
+    const meta = { t: Date.now(), expiry: expiry ? (Date.now() + expiry*60000) : null };
+    const payload = JSON.stringify({ meta, text: plaintext });
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoder.encode(payload));
+    // Build compact blob: salt.iv.ciphertext (all base64url)
+    return `${bufToB64(salt)}.${bufToB64(iv)}.${bufToB64(ct)}`;
+  }
+
+  async function decryptBlob(password, blob) {
+    try {
+      const [saltB64, ivB64, ctB64] = blob.split('.');
+      if (!saltB64 || !ivB64 || !ctB64) throw new Error('invalid blob');
+      const salt = b64ToBuf(saltB64);
+      const iv = b64ToBuf(ivB64);
+      const ct = b64ToBuf(ctB64);
+      const key = await deriveKey(password, salt);
+      const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(iv) }, key, ct);
+      const payload = JSON.parse(decoder.decode(plainBuf));
+      // check expiry
+      if (payload.meta && payload.meta.expiry && Date.now() > payload.meta.expiry) {
+        throw new Error('message expired');
+      }
+      return { ok: true, text: payload.text, meta: payload.meta };
+    } catch (e) {
+      return { ok: false, error: e.message || String(e) };
+    }
+  }
+
+  // Elements
+  const messageEl = document.getElementById('message');
+  const passwordEl = document.getElementById('password');
+  const expiryEl = document.getElementById('expiry');
+  const createBtn = document.getElementById('createBtn');
+  const decryptBtn = document.getElementById('decryptBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const linkArea = document.getElementById('linkArea');
+  const sharelink = document.getElementById('sharelink');
+  const copyBtn = document.getElementById('copyBtn');
+  const openBtn = document.getElementById('openBtn');
+  const decryptedArea = document.getElementById('decryptedArea');
+  const decrypted = document.getElementById('decrypted');
+
+  function showLink(url) {
+    sharelink.textContent = url;
+    linkArea.style.display = 'block';
+  }
+
+  createBtn.addEventListener('click', async () => {
+    const text = messageEl.value.trim();
+    if (!text) { alert('Please enter a message to share.'); return; }
+    const pw = passwordEl.value;
+    const expiry = parseInt(expiryEl.value) || null;
+    createBtn.disabled = true;
+    createBtn.textContent = 'Encrypting...';
+    try {
+      const blob = await encryptMessage(pw, text, expiry);
+      // Use fragment so it's never sent to server
+      const u = new URL(location.href);
+      u.hash = 'msg=' + encodeURIComponent(blob);
+      // Put a friendly short fragment for read: #msg=...
+      showLink(u.toString());
+    } catch (e) {
+      alert('Encryption failed: ' + e);
+    } finally {
+      createBtn.disabled = false;
+      createBtn.textContent = 'Create shareable link';
+    }
+  });
+
+  copyBtn.addEventListener('click', async () => {
+    const txt = sharelink.textContent;
+    if (!txt) return;
+    try { await navigator.clipboard.writeText(txt); alert('Link copied to clipboard'); }
+    catch (e) { prompt('Copy this link:', txt); }
+  });
+
+  openBtn.addEventListener('click', () => {
+    const txt = sharelink.textContent;
+    if (!txt) return;
+    window.open(txt, '_blank');
+  });
+
+  clearBtn.addEventListener('click', () => {
+    messageEl.value = '';
+    expiryEl.value = '';
+    linkArea.style.display = 'none';
+    decryptedArea.style.display = 'none';
+    sharelink.textContent = '';
+    decrypted.value = '';
+    // clear fragment without reloading
+    history.replaceState(null, '', location.pathname + location.search);
+  });
+
+  async function tryDecryptFromFragment() {
+    const frag = location.hash ? location.hash.substring(1) : '';
+    if (!frag) return null;
+    // expect format msg=<blob>
+    const params = new URLSearchParams(frag);
+    const blob = params.get('msg');
+    if (!blob) return null;
+    // auto attempt decrypt using preset password
+    const pw = passwordEl.value;
+    decryptedArea.style.display = 'block';
+    decrypted.value = 'Attempting to decrypt...';
+    const result = await decryptBlob(pw, decodeURIComponent(blob));
+    if (result.ok) {
+      decrypted.value = result.text;
+      return result;
+    } else {
+      decrypted.value = 'Failed to decrypt: ' + result.error;
+      return result;
+    }
+  }
+
+  decryptBtn.addEventListener('click', async () => {
+    await tryDecryptFromFragment();
+  });
+
+  // Decrypt automatically on load if there's a fragment
+  window.addEventListener('load', async () => {
+    const frag = location.hash ? location.hash.substring(1) : '';
+    if (!frag) return;
+    // show link area with current full URL (so user can copy)
+    showLink(location.toString());
+    await tryDecryptFromFragment();
+  });
+
+  // Expose for debugging in console
+  window._secureShare = { encryptMessage, decryptBlob };
+
+})();
+</script>
+</body>
+</html>
