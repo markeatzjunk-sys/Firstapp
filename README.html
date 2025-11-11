@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>SimpleSecureChat — password "elephant"</title>
+<style>
+  body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial;background:#f5f7fb;margin:18px;color:#0b1220}
+  .card{max-width:900px;margin:0 auto;background:#fff;padding:18px;border-radius:12px;box-shadow:0 8px 24px rgba(11,18,32,0.06)}
+  h1{margin:0 0 8px;font-size:20px}
+  p.lead{margin:0 0 14px;color:#475569}
+  .row{display:flex;gap:8px;align-items:center;margin:8px 0}
+  input[type=text], textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #e6eef6;font-size:14px}
+  textarea{min-height:80px;resize:vertical}
+  button{background:#0f62fe;color:#fff;border:0;padding:10px 12px;border-radius:8px;font-weight:600;cursor:pointer}
+  button.ghost{background:#eef2ff;color:#0f62fe;border:1px solid #dbeafe}
+  .panel{margin-top:12px;padding:12px;border-radius:10px;background:#fbfdff;border:1px solid #eef6ff}
+  #chatBox{height:320px;overflow:auto;padding:10px;border-radius:8px;border:1px solid #eef2fb;background:#fff}
+  .msg{margin:8px 0;padding:8px;border-radius:8px;max-width:78%}
+  .me{background:#eef2ff;margin-left:auto;color:#052c65}
+  .peer{background:#f1f5f9;color:#0f172a}
+  .small{font-size:12px;color:#6b7280}
+  .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef2ff;color:#0f62fe;font-weight:700}
+  label{font-weight:600;margin-bottom:6px;display:block}
+  .blob{white-space:pre-wrap;background:#fff;border-radius:8px;padding:8px;border:1px dashed #e5e7eb;max-height:180px;overflow:auto}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>SimpleSecureChat — shareable & encrypted</h1>
+  <p class="lead">Password preset to <span class="pill">elephant</span>. Create a room, share its URL, then use the offer/answer blobs to connect peers. All message encryption happens locally.</p>
+
+  <div class="row">
+    <button id="createRoomBtn">Create room</button>
+    <input id="roomInput" placeholder="Or paste room id / URL (e.g. ?room=abc123)"/>
+    <button id="joinRoomBtn" class="ghost">Join room</button>
+  </div>
+
+  <div id="roomPanel" class="panel" style="display:none">
+    <label>Room URL</label>
+    <div class="blob" id="roomUrlDiv"></div>
+    <div class="row" style="margin-top:8px">
+      <label style="width:110px">Room ID</label>
+      <input id="roomId" readonly/>
+      <button id="copyRoom" class="ghost" style="width:120px">Copy URL</button>
+    </div>
+
+    <hr style="margin:12px 0">
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div>
+        <label>Create Offer</label>
+        <div class="small">Click to create an offer for a new participant; copy & send the Offer Blob to them.</div>
+        <div style="margin-top:8px">
+          <button id="createOfferBtn">Create Offer</button>
+        </div>
+        <label style="margin-top:8px">Offer Blob</label>
+        <div id="offerBlob" class="blob"></div>
+      </div>
+
+      <div>
+        <label>Respond / Apply Answer</label>
+        <div class="small">If you receive an offer, paste it in "Remote Offer" and click Create Answer. If you are the offerer, paste Remote Answer below and Apply Answer.</div>
+        <label style="margin-top:8px">Remote Offer</label>
+        <textarea id="remoteOffer" placeholder="Paste remote offer blob here"></textarea>
+        <div style="margin-top:8px">
+          <button id="createAnswerBtn" class="ghost">Create Answer</button>
+        </div>
+        <label style="margin-top:8px">Answer Blob (copy to offerer)</label>
+        <div id="answerBlob" class="blob"></div>
+
+        <label style="margin-top:8px">Remote Answer (paste here if you created the offer)</label>
+        <textarea id="remoteAnswer" placeholder="Paste remote answer blob here"></textarea>
+        <div style="margin-top:8px;margin-bottom:8px">
+          <button id="applyAnswerBtn" class="ghost">Apply remote answer</button>
+        </div>
+      </div>
+    </div>
+
+    <hr style="margin:12px 0">
+
+    <label>Chat</label>
+    <div id="chatBox"></div>
+    <div class="row" style="margin-top:8px">
+      <input id="msg" placeholder="Type a message and press Enter"/>
+      <button id="sendBtn">Send</button>
+    </div>
+    <div class="small" style="margin-top:8px">Peers: <span id="peerCount">0</span></div>
+  </div>
+
+  <p class="small" style="margin-top:12px"><strong>Note:</strong> This demo uses manual signaling (copy/paste blobs) — no central server. Each pair requires one offer/answer exchange. Use for small, low-risk groups only.</p>
+</div>
+
+<script>
+(async () => {
+  // Preset password
+  const PASSWORD = 'elephant';
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+
+  // DOM
+  const createRoomBtn = document.getElementById('createRoomBtn');
+  const joinRoomBtn = document.getElementById('joinRoomBtn');
+  const roomInput = document.getElementById('roomInput');
+  const roomPanel = document.getElementById('roomPanel');
+  const roomUrlDiv = document.getElementById('roomUrlDiv');
+  const roomIdInput = document.getElementById('roomId');
+  const copyRoom = document.getElementById('copyRoom');
+  const createOfferBtn = document.getElementById('createOfferBtn');
+  const offerBlobDiv = document.getElementById('offerBlob');
+  const remoteOfferTA = document.getElementById('remoteOffer');
+  const createAnswerBtn = document.getElementById('createAnswerBtn');
+  const answerBlobDiv = document.getElementById('answerBlob');
+  const remoteAnswerTA = document.getElementById('remoteAnswer');
+  const applyAnswerBtn = document.getElementById('applyAnswerBtn');
+  const chatBox = document.getElementById('chatBox');
+  const msgInput = document.getElementById('msg');
+  const sendBtn = document.getElementById('sendBtn');
+  const peerCountSpan = document.getElementById('peerCount');
+
+  // State
+  let roomId = null;
+  let myId = null;
+  let peers = {}; // peerId -> { pc, dc }
+  function randId(len=6){ const CH='abcdefghijklmnopqrstuvwxyz0123456789'; let s=''; for(let i=0;i<len;i++) s+=CH[Math.floor(Math.random()*CH.length)]; return s; }
+
+  // Crypto helpers: base64url
+  function b64uEncode(buf){
+    let bin='';
+    const bytes=new Uint8Array(buf);
+    const chunk=0x8000;
+    for(let i=0;i<bytes.length;i+=chunk) bin+=String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+    return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  }
+  function b64uDecode(b64){
+    const b = b64.replace(/-/g,'+').replace(/_/g,'/');
+    const pad = b.length % 4;
+    const str = b + (pad ? '='.repeat(4-pad) : '');
+    const bin = atob(str);
+    const buf = new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) buf[i]=bin.charCodeAt(i);
+    return buf.buffer;
+  }
+
+  async function deriveKey(password, salt, iterations=150000){
+    const pwKey = await crypto.subtle.importKey('raw', encoder.encode(password),'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name:'PBKDF2', salt, iterations, hash:'SHA-256' }, pwKey, { name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']);
+  }
+
+  async function encryptForRoom(room, plaintext){
+    const salt = crypto.getRandomValues(new Uint8Array(12));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(PASSWORD + '|' + room, salt.buffer);
+    const ct = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, encoder.encode(plaintext));
+    return `${b64uEncode(salt)}.${b64uEncode(iv)}.${b64uEncode(ct)}`;
+  }
+  async function decryptForRoom(room, blob){
+    try {
+      const [saltB, ivB, ctB] = blob.split('.');
+      if(!saltB||!ivB||!ctB) throw new Error('invalid blob');
+      const salt = b64uDecode(saltB);
+      const iv = b64uDecode(ivB);
+      const ct = b64uDecode(ctB);
+      const key = await deriveKey(PASSWORD + '|' + room, salt);
+      const plain = await crypto.subtle.decrypt({ name:'AES-GCM', iv: new Uint8Array(iv) }, key, ct);
+      return { ok:true, text: decoder.decode(plain) };
+    } catch(e){ return { ok:false, error: e.message||String(e) }; }
+  }
+
+  // Signal blob encoding
+  function makeBlob(obj){ return btoa(unescape(encodeURIComponent(JSON.stringify(obj)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+  function parseBlob(s){ try { const b = s.replace(/-/g,'+').replace(/_/g,'/'); const str = decodeURIComponent(escape(atob(b))); return JSON.parse(str); } catch(e){ return null; } }
+
+  // UI helpers
+  function log(text, who='peer'){ const d=document.createElement('div'); d.className='msg ' + (who==='me'?'me':'peer'); d.innerHTML=`<div class="small">${who==='me'?'You':who} · ${new Date().toLocaleTimeString()}</div><div style="margin-top:6px">${escapeHtml(text)}</div>`; chatBox.appendChild(d); chatBox.scrollTop = chatBox.scrollHeight; }
+  function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br/>'); }
+  function updatePeerCount(){ peerCountSpan.textContent = Object.keys(peers).length; }
+
+  // WebRTC helpers
+  function newPeer(peerId, initiator=false){
+    const pc = new RTCPeerConnection({ iceServers:[{ urls: ['stun:stun.l.google.com:19302'] }] });
+    let dc = null;
+    pc.onicecandidate = () => { /* included in SDP blob (we wait a moment) */ };
+    pc.onconnectionstatechange = () => {
+      if(pc.connectionState==='failed' || pc.connectionState==='disconnected' || pc.connectionState==='closed'){
+        if(peers[peerId]){ try{ peers[peerId].pc.close(); }catch(e){} delete peers[peerId]; updatePeerCount(); }
+      }
+    };
+    pc.ondatachannel = (ev) => { dc = ev.channel; setupDC(peerId, dc); };
+    if(initiator){
+      dc = pc.createDataChannel('chat');
+      setupDC(peerId, dc);
+    }
+    peers[peerId] = { pc, dc };
+    updatePeerCount();
+    return peers[peerId];
+  }
+
+  function setupDC(peerId, dc){
+    dc.onopen = () => { console.log('dc open', peerId); };
+    dc.onmessage = async (ev) => {
+      try {
+        const p = JSON.parse(ev.data);
+        if(p.t==='encmsg'){ const res = await decryptForRoom(roomId, p.b); if(res.ok) log(res.text, p.from||'peer'); }
+      } catch(e){ console.log('raw', ev.data); }
+    };
+    dc.onclose = () => { if(peers[peerId]){ try{ peers[peerId].pc.close(); }catch(e){} delete peers[peerId]; updatePeerCount(); } };
+  }
+
+  async function broadcast(text){
+    const blob = await encryptForRoom(roomId, text);
+    for(const pid of Object.keys(peers)){
+      const entry = peers[pid];
+      if(entry && entry.dc && entry.dc.readyState==='open'){ try{ entry.dc.send(JSON.stringify({ t:'encmsg', b:blob, from: myId })); }catch(e){} }
+    }
+  }
+
+  // UI wiring
+  createRoomBtn.addEventListener('click', ()=>{
+    myId = 'u-' + randId(6);
+    roomId = randId(10);
+    showRoom();
+  });
+
+  joinRoomBtn.addEventListener('click', ()=>{
+    let v = (roomInput.value||'').trim();
+    if(!v){ alert('Paste or enter a room id or URL'); return; }
+    try{ const u = new URL(v, location.href); v = u.searchParams.get('room') || u.hash.replace(/^#/, '') || v; } catch(e){}
+    if(!v){ alert('Could not detect room id'); return; }
+    myId = 'u-' + randId(6);
+    roomId = v;
+    showRoom();
+  });
+
+  function showRoom(){
+    roomPanel.style.display = 'block';
+    roomIdInput.value = roomId;
+    const url = location.origin + location.pathname + '?room=' + encodeURIComponent(roomId);
+    roomUrlDiv.textContent = url;
+    try{ history.replaceState(null,'','?room='+encodeURIComponent(roomId)); }catch(e){}
+  }
+
+  copyRoom.addEventListener('click', async ()=>{
+    try{ await navigator.clipboard.writeText(roomUrlDiv.textContent); alert('Room URL copied'); } catch(e){ prompt('Copy URL', roomUrlDiv.textContent); }
+  });
+
+  // Create offer (for a new participant slot)
+  createOfferBtn.addEventListener('click', async ()=>{
+    const pid = 'p-' + randId(6);
+    const entry = newPeer(pid, true);
+    const pc = entry.pc;
+    try{
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      // gather ICE a bit
+      await new Promise(r=>setTimeout(r,700));
+      const blob = makeBlob({ v:1, t:'offer', peerId: pid, from: myId, sdp: pc.localDescription });
+      offerBlobDiv.textContent = blob;
+      alert('Offer created — copy the Offer Blob and send it to a participant who will create an Answer.');
+    } catch(e){ alert('Offer failed: '+e); }
+  });
+
+  // Create answer (peer side) from remote offer
+  createAnswerBtn.addEventListener('click', async ()=>{
+    const raw = remoteOfferTA.value.trim();
+    if(!raw){ alert('Paste an Offer Blob to respond'); return; }
+    const obj = parseBlob(raw);
+    if(!obj || obj.t!=='offer'){ alert('Invalid offer blob'); return; }
+    const pid = obj.peerId || ('p-'+randId(6));
+    const entry = newPeer(pid, false);
+    try{
+      await entry.pc.setRemoteDescription(new RTCSessionDescription(obj.sdp));
+      const answer = await entry.pc.createAnswer();
+      await entry.pc.setLocalDescription(answer);
+      await new Promise(r=>setTimeout(r,700));
+      const blob = makeBlob({ v:1, t:'answer', peerId: pid, from: myId, sdp: entry.pc.localDescription });
+      answerBlobDiv.textContent = blob;
+      alert('Answer created — copy it and send back to the offer creator.');
+    } catch(e){ alert('Failed to create answer: '+e); }
+  });
+
+  // Apply remote answer (offerer pastes this)
+  applyAnswerBtn.addEventListener('click', async ()=>{
+    const raw = remoteAnswerTA.value.trim();
+    if(!raw){ alert('Paste an Answer Blob to apply'); return; }
+    const obj = parseBlob(raw);
+    if(!obj || obj.t!=='answer'){ alert('Invalid answer blob'); return; }
+    const pid = obj.peerId;
+    const entry = peers[pid];
+    if(!entry){ alert('No matching peer slot found. You must create an offer first (Create Offer).'); return; }
+    try{
+      await entry.pc.setRemoteDescription(new RTCSessionDescription(obj.sdp));
+      alert('Answer applied. Connection should establish if remote peer has set their side.');
+    } catch(e){ alert('Failed to apply answer: '+e); }
+  });
+
+  sendBtn.addEventListener('click', async ()=>{ const t = msgInput.value.trim(); if(!t) return; msgInput.value=''; log(t,'me'); await broadcast(t); });
+  msgInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendBtn.click(); } });
+
+  // Pre-fill room if present in URL
+  (function prefill(){
+    try{ const u = new URL(location.href); const r = u.searchParams.get('room'); if(r) roomInput.value = r; } catch(e) {}
+  })();
+
+  // Expose for debugging
+  window._simplechat = { peers, encryptForRoom: encryptForRoom, decryptForRoom: decryptForRoom, PASSWORD };
+
+})();
+</script>
+</body>
+</html>
